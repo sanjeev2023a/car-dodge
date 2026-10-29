@@ -1,0 +1,175 @@
+name: Build Car Dodge Release APK & AAB
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Unpack & Fix Project Files
+        run: |
+          for z in *.zip; do
+            if [ -f "$z" ]; then
+              unzip -o -q "$z"
+            fi
+          done
+          if [ -d "TrafficDodge2D_HighwayLegend" ]; then
+            cp -rn TrafficDodge2D_HighwayLegend/* . || true
+            cp -rf TrafficDodge2D_HighwayLegend/app .
+          fi
+
+          # Fix constructor parameter names in MainActivity.kt
+          MAIN_KT="app/src/main/java/com/highwaylegend/trafficdodge2d/MainActivity.kt"
+          sed -i 's/initialCoins = totalCoins/coins = totalCoins/g' "$MAIN_KT"
+          sed -i 's/initialBest = highScore/bestScore = highScore/g' "$MAIN_KT"
+
+          # Fix targetApi in AndroidManifest.xml for SDK 34
+          sed -i 's/tools:targetApi="35"/tools:targetApi="34"/g' app/src/main/AndroidManifest.xml
+          rm -f app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+
+          cat > settings.gradle.kts << 'EOF_SETTINGS'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "TrafficDodge2D"
+          include(":app")
+          EOF_SETTINGS
+
+          cat > build.gradle.kts << 'EOF_ROOT'
+          plugins {
+              id("com.android.application") version "8.3.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+          }
+          EOF_ROOT
+
+          cat > gradle.properties << 'EOF_PROPS'
+          org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          EOF_PROPS
+
+          cat > app/build.gradle.kts << 'EOF_APP'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.highwaylegend.trafficdodge2d"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.highwaylegend.trafficdodge2d"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+                  vectorDrawables {
+                      useSupportLibrary = true
+                  }
+              }
+
+              signingConfigs {
+                  create("release") {
+                      storeFile = file("release-keystore.jks")
+                      storePassword = "HighwayLegend2026!"
+                      keyAlias = "highway_legend_key"
+                      keyPassword = "HighwayLegend2026!"
+                  }
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                      isShrinkResources = false
+                      signingConfig = signingConfigs.getByName("release")
+                  }
+                  debug {
+                      signingConfig = signingConfigs.getByName("release")
+                  }
+              }
+
+              lint {
+                  checkReleaseBuilds = false
+                  abortOnError = false
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.12.0")
+              implementation("androidx.appcompat:appcompat:1.6.1")
+              implementation("com.google.android.material:material:1.11.0")
+              implementation("androidx.activity:activity-ktx:1.8.2")
+              implementation("com.google.android.gms:play-services-ads:23.0.0")
+          }
+          EOF_APP
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle 8.7
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Generate V1+V2+V3 Release Signing Keystore
+        run: |
+          rm -f app/release-keystore.jks
+          keytool -genkeypair -v \
+            -keystore app/release-keystore.jks \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias highway_legend_key \
+            -storepass "HighwayLegend2026!" \
+            -keypass "HighwayLegend2026!" \
+            -dname "CN=Car Dodge, OU=GameStudio, O=HighwayLegend, L=Patna, S=BR, C=IN"
+
+      - name: Build Signed Release APK & Play Store AAB
+        run: |
+          set -o pipefail
+          gradle assembleRelease bundleRelease -x lint -x lintVitalRelease --no-daemon --stacktrace 2>&1 | tee build.log || {
+            echo "### Build Error Log" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            grep -E "e: |FAILURE:|What went wrong|Caused by:" -A 5 build.log | tail -n 60 >> $GITHUB_STEP_SUMMARY \vert{}\vert{} tail -n 60 build.log >>$GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit 1
+          }
+
+      - name: Upload Signed APK, AAB & Keystore
+        uses: actions/upload-artifact@v4
+        with:
+          name: CarDodge-v1.0-Signed-Release-Files
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/bundle/release/*.aab
+            app/release-keystore.jks
+            
